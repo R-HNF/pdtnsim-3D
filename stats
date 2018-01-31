@@ -1,0 +1,596 @@
+#!/usr/bin/env perl
+#
+# Calcurate statistics of values in each column.
+# Copyright (c) 2003-2015, Hiroyuki Ohsaki.
+# All rights reserved.
+#
+# $Id: stats,v 1.22 2015/11/25 03:11:54 ohsaki Exp $
+#
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+# usage: stats [-va] [-t type[,type...]] [file...]
+
+use File::Basename;
+use Getopt::Std;
+use List::Util;
+use Smart::Comments;
+use diagnostics;
+use strict;
+use warnings;
+
+our %STAT_TBL = (
+    count  => \&count,
+    sum    => \&sum,
+    total  => \&sum,        # backward compatibility
+    min    => \&min,
+    max    => \&max,
+    mean   => \&mean,
+    median => \&median,
+    mode   => \&mode,
+    var    => \&variance,
+    stddev => \&stddev,
+    skew   => \&skewness,
+    kurt   => \&kurtosis,
+    cv => sub { $_ = shift; 100 * stddev($_) / mean($_) },
+    quant10 => sub { percentile( 0.1,   shift ) },
+    quant25 => sub { percentile( 0.25,  shift ) },
+    quant50 => sub { percentile( 0.5,   shift ) },
+    quant75 => sub { percentile( 0.75,  shift ) },
+    quant90 => sub { percentile( 0.9,   shift ) },
+    conf90  => sub { conf_interval( 90, shift ) },
+    conf95  => sub { conf_interval( 95, shift ) },
+    conf99  => sub { conf_interval( 99, shift ) },
+    covar   => \&covariance,
+    corr    => \&correlation,
+    spearmn => \&rank_correlation,
+    kendall => \&kendall_tau,
+    findex  => \&fairness_index,
+);
+
+our %IS_MULTI = qw(covar 1 corr 1 spearmn 1 kendall 1);
+
+sub usage {
+    my $prog = basename($0);
+    my $types = join( '/', sort keys %STAT_TBL );
+    die <<EOF;
+usage: $0 [-v] [-t type[,type...]] [file...]
+  -v                 display label for each statistic
+  -t type[,type...]  specify statistic to display ($types)
+EOF
+}
+
+sub sign {
+    my $val = shift;
+
+    return -1 if ( $val < 0 );
+    return 1  if ( $val > 0 );
+    return 0;
+}
+
+sub count ($_) {
+    my $listp = shift;
+
+    return scalar( @{$listp} );
+}
+
+sub sum ($_) {
+    my $listp = shift;
+
+    my $sum = 0;
+    $sum += $_ for ( @{$listp} );
+    return $sum;
+}
+
+sub min ($_) {
+    my $listp = shift;
+
+    my $min;
+    for ( @{$listp} ) {
+        $min = $_ if ( !defined $min or $_ < $min );
+    }
+    return $min;
+}
+
+sub max ($_) {
+    my $listp = shift;
+
+    my $max;
+    for ( @{$listp} ) {
+        $max = $_ if ( !defined $max or $_ > $max );
+    }
+    return $max;
+}
+
+sub mean ($) {
+    my $listp = shift;
+
+    return undef unless count($listp);
+    return sum($listp) / count($listp);
+}
+
+sub median ($) {
+    my $listp = shift;
+
+    return ( sort { $a <=> $b } @{$listp} )[ int( $#{$listp} / 2 ) ];
+}
+
+sub mode ($) {
+    my $listp = shift;
+
+    my %counts;
+    $counts{$_}++ for @{$listp};
+    return ( sort { $counts{$b} <=> $counts{$a} } keys %counts )[0];
+}
+
+sub moment ($$) {
+    my ( $n, $listp ) = @_;
+
+    my $mean = mean($listp);
+    my @l = map { ( $_ - $mean )**$n } @{$listp};
+    return mean( \@l );
+}
+
+sub variance ($) {
+    my $listp = shift;
+
+    return moment( 2, $listp );
+}
+
+sub stddev ($) {
+    my $listp = shift;
+
+    return sqrt( variance($listp) );
+}
+
+sub skewness ($) {
+    my $listp = shift;
+
+    return ( moment( 3, $listp ) / moment( 2, $listp )**1.5 );
+}
+
+sub kurtosis ($) {
+    my $listp = shift;
+
+    return ( moment( 4, $listp ) / moment( 2, $listp )**2 - 3 );
+}
+
+# return the P-percentile
+sub percentile ($$) {
+    my ( $p, $listp ) = @_;
+
+    return ( sort { $a <=> $b } @{$listp} )[ int( count($listp) * $p ) ];
+}
+
+# return the LEVEL% confidence interval
+sub conf_interval ($$) {
+    my ( $level, $listp ) = @_;
+
+    my %zval = (
+        90   => 1.645,
+        95   => 1.960,
+        99   => 2.576,
+        99.9 => 3.29
+    );
+    return undef unless ( exists $zval{$level} );
+    return undef unless count($listp);
+    return ( $zval{$level} * stddev($listp) / sqrt( count($listp) ) );
+}
+
+sub covariance ($$) {
+    my ( $x, $y ) = @_;
+
+    my $meanx = mean($x);
+    my $meany = mean($y);
+    my @l     = map { ( $x->[$_] - $meanx ) * ( $y->[$_] - $meany ) }
+        ( 0 .. $#{$x} );
+    my $cov = mean( \@l );
+    return $cov;
+}
+
+sub correlation ($$) {
+    my ( $x, $y ) = @_;
+
+    return covariance( $x, $y ) / sqrt( variance($x) ) / sqrt( variance($y) );
+}
+
+sub rank ($) {
+    my $listp = shift;
+
+    my @sorted = sort { $a <=> $b } @{$listp};
+    my %rank_by_val;
+    for ( 0 .. $#{$listp} ) {
+        $rank_by_val{ $sorted[$_] } = $_ + 1;
+    }
+    return [ map { $rank_by_val{$_} } @{$listp} ];
+}
+
+sub rank_correlation ($$) {
+    my ( $x, $y ) = @_;
+
+    my $x_rank = rank($x);
+    my $y_rank = rank($y);
+    return correlation( $x_rank, $y_rank );
+}
+
+sub kendall_tau ($$) {
+    my ( $x, $y ) = @_;
+
+    my $x_rank   = rank($x);
+    my $y_rank   = rank($y);
+    my $ncordant = 0;
+    for my $i ( 0 .. $#{$x_rank} - 1 ) {
+        for my $j ( $i + 1 .. $#{$x_rank} ) {
+            if ( sign( $x_rank->[$j] - $x_rank->[$i] )
+                == sign( $y_rank->[$j] - $y_rank->[$i] ) )
+            {
+                $ncordant++;
+            }
+            else {
+                $ncordant--;
+            }
+        }
+    }
+    my $n = count($x);
+    return $ncordant / ( $n * ( $n - 1 ) / 2 );
+}
+
+sub fairness_index ($) {
+    my $listp = shift;
+
+    my $n = count($listp);
+    my @l = map { $_**2 } @{$listp};
+    return sum($listp)**2 / ( $n * sum( \@l ) );
+}
+
+sub format_number ($) {
+    my $n = shift;
+
+    return 'NaN' unless defined $n;
+    return sprintf( '%g', $n );
+}
+
+our ( $opt_v, $opt_a, $opt_t );
+getopts('vat:') || usage;
+my $verbose = $opt_v;
+my @stat_types
+    = $opt_t
+    ? split( ',', $opt_t )
+    : qw(count sum min max mean median mode var stddev cv skew kurt quant10 quant25 quant50 quant75 quant90 conf90 conf95 conf99 findex);
+@stat_types = sort keys %STAT_TBL if $opt_a;
+
+# load each column into @LIST
+my @col;
+while (<>) {
+    chomp;
+    next unless /^\s*([+-.\d]|NaN)/i;
+    my @f = split( /\s+/, $_ );
+    for ( 0 .. $#f ) {
+        if ( $f[$_] eq 'NaN' ) {
+            $col[$_] = [] unless $col[$_];
+        }
+        else {
+            push( @{ $col[$_] }, $f[$_] );
+        }
+    }
+}
+
+# display statistics for each column
+for my $type (@stat_types) {
+    my @val;
+    die "Unsupported statistic `$type'\n" unless ( defined $STAT_TBL{$type} );
+    if ( $IS_MULTI{$type} ) {
+        for ( 0 .. $#col - 1 ) {
+            push( @val, $STAT_TBL{$type}->( $col[$_], $col[ $_ + 1 ] ) );
+        }
+    }
+    else {
+        @val = map { $STAT_TBL{$type}->($_) } @col;
+    }
+    next unless @val;
+    print "$type\t" if $verbose;
+    print join( "\t", map { format_number($_) } @val ), "\n";
+}
+
+__END__
+
+=head1 NAME
+
+stats - Calcurate statistics of values in each column
+
+=head1 SYNOPSIS
+
+  stats [-v] [-t type[,type...]] [file...]
+
+=head1 DESCRIPTION
+
+This manual page documents B<stats>.  This program is for calcurating
+various statistics of values in each column.  B<stats> can compute
+several statistics: the number of values, sum, minimum, maximum, mean,
+variance, standard deviation, coefficient of variation, 25%/50%/75%
+quantiles, and 90%/95%/99% confidence interlvals.  B<stats> can also
+compute statistic for multiple data sets: covariance and correlation
+coefficient.
+
+B<stats> calcurates statistics of numbers in all lines, located at the
+same column position.  For instance, if the input file has N colums,
+B<stats> displays statistics for these N columns.
+
+The input file format of B<stats> is straightforward; each column is
+seperated by whitespace, and each value is any valid Perl number.  See
+C<perlre(1)> and C<perlnumber(1)> for details of whitespace characters
+and valid number formats.
+
+=head1 OPTIONS
+
+=over 4
+
+=item I<-v>
+
+Display label for each statistic
+
+=item I<-t type[,type...]>
+
+Specify statistic to display.  I<type> must be one of the following
+keywordss.
+
+  count      the number of values
+  sum        sum
+  min        minimum
+  max        maximum
+  mean       sample mean
+  median     median
+  mode       mode
+  var        sample variance
+  stddev     standard deviation
+  skew       skewness
+  kurt       kurtosis
+  cv         coefficient of variation
+  quant10    10% quantile
+  quant25    25% quantile
+  quant50    50% quantile
+  quant75    75% quantile
+  quant90    90% quantile
+  conf90     90% confidence interval
+  conf95     95% confidence interval
+  conf99     99% confidence interval
+  covar      covariance
+  corr       correlation coefficient
+  spearmn    Spearman's rank correlation
+  kendall    Kendall's rank correlation
+  findex     Jain's fairness index
+
+=back
+
+=head1 EXAMPLE
+
+=over 4
+
+=item - Read numbers from standard input
+
+  $ seq 10
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+  10
+
+  $ seq 10 | stats -v
+  count   10
+  sum     55
+  min     1
+  max     10
+  mean    5.5
+  median  5
+  mode    6
+  var     8.25
+  stddev  2.87228
+  cv      52.2233
+  skew    0
+  kurt    -1.22424
+  quant10 2
+  quant25 3
+  quant50 6
+  quant75 8
+  quant90 10
+  conf90  1.49415
+  conf95  1.78026
+  conf99  2.33977
+  findex  0.785714
+  
+=item - Select statistic to display
+
+  $ seq 10 | stats -t mean
+          5.5000
+
+Also, you can specify list of statistics to display.
+
+  $ seq 1 10 | stats -t mean,var
+          5.5000
+          8.2500
+
+=item - B<stats> displays statistics for multiple columns
+
+  $ seq 10 | column -c 16
+  1       6
+  2       7
+  3       8
+  4       9
+  5       10
+
+  $ seq 10 | column -c 16 | stats -v
+  count   5       5
+  sum     15      40
+  min     1       6
+  max     5       10
+  mean    3       8
+  median  3       8
+  mode    5       6
+  var     2       2
+  stddev  1.41421 1.41421
+  cv      47.1405 17.6777
+  skew    0       0
+  kurt    -1.3    -1.3
+  quant10 1       6
+  quant25 2       7
+  quant50 3       8
+  quant75 4       9
+  quant90 5       10
+  conf90  1.04039 1.04039
+  conf95  1.23961 1.23961
+  conf99  1.62921 1.62921
+  findex  0.818182        0.969697
+  
+=item - Check file size statistics of some device driver
+
+  % cd /usr/src/linux/net/ipv4
+
+  % ls -l *.c
+  -rw-rw-r-- 1 root root  45818 Nov  2 09:05 af_inet.c
+  -rw-rw-r-- 1 root root  13814 Nov  2 09:05 ah4.c
+  -rw-rw-r-- 1 root root  35054 Nov  2 09:05 arp.c
+  -rw-rw-r-- 1 root root  64272 Nov  2 09:05 cipso_ipv4.c
+  -rw-rw-r-- 1 root root   3245 Nov  2 09:05 datagram.c
+  -rw-rw-r-- 1 root root  60368 Nov  2 09:05 devinet.c
+  -rw-rw-r-- 1 root root  17715 Nov  2 09:05 esp4.c
+  -rw-rw-r-- 1 root root  31111 Nov  2 09:05 fib_frontend.c
+  -rw-rw-r-- 1 root root   8404 Nov  2 09:05 fib_rules.c
+  -rw-rw-r-- 1 root root  37178 Nov  2 09:05 fib_semantics.c
+  -rw-rw-r-- 1 root root  65563 Nov  2 09:05 fib_trie.c
+  -rw-rw-r-- 1 root root  21349 Nov  2 09:05 fou.c
+  -rw-rw-r-- 1 root root   2909 Nov  2 09:05 gre_demux.c
+  -rw-rw-r-- 1 root root   6387 Nov  2 09:05 gre_offload.c
+  -rw-rw-r-- 1 root root  29472 Nov  2 09:05 icmp.c
+  -rw-rw-r-- 1 root root  72215 Nov  2 09:05 igmp.c
+  -rw-rw-r-- 1 root root  27977 Nov  2 09:05 inet_connection_sock.c
+  -rw-rw-r-- 1 root root  29166 Nov  2 09:05 inet_diag.c
+  -rw-rw-r-- 1 root root  10850 Nov  2 09:05 inet_fragment.c
+  -rw-rw-r-- 1 root root  16957 Nov  2 09:05 inet_hashtables.c
+  -rw-rw-r-- 1 root root   9482 Nov  2 09:05 inet_lro.c
+  -rw-rw-r-- 1 root root   9165 Nov  2 09:05 inet_timewait_sock.c
+  -rw-rw-r-- 1 root root  16266 Nov  2 09:05 inetpeer.c
+  -rw-rw-r-- 1 root root   3998 Nov  2 09:05 ip_forward.c
+  -rw-rw-r-- 1 root root  21583 Nov  2 09:05 ip_fragment.c
+  -rw-rw-r-- 1 root root  34240 Nov  2 09:05 ip_gre.c
+  -rw-rw-r-- 1 root root  13810 Nov  2 09:05 ip_input.c
+  -rw-rw-r-- 1 root root  15637 Nov  2 09:05 ip_options.c
+  -rw-rw-r-- 1 root root  40333 Nov  2 09:05 ip_output.c
+  -rw-rw-r-- 1 root root  35675 Nov  2 09:05 ip_sockglue.c
+  -rw-rw-r-- 1 root root  28418 Nov  2 09:05 ip_tunnel.c
+  -rw-rw-r-- 1 root root  11741 Nov  2 09:05 ip_tunnel_core.c
+  -rw-rw-r-- 1 root root  14330 Nov  2 09:05 ip_vti.c
+  -rw-rw-r-- 1 root root   4756 Nov  2 09:05 ipcomp.c
+  -rw-rw-r-- 1 root root  40057 Nov  2 09:05 ipconfig.c
+  -rw-rw-r-- 1 root root  15510 Nov  2 09:05 ipip.c
+  -rw-rw-r-- 1 root root  65328 Nov  2 09:05 ipmr.c
+  -rw-rw-r-- 1 root root   5302 Nov  2 09:05 netfilter.c
+  -rw-rw-r-- 1 root root  29801 Nov  2 09:05 ping.c
+  -rw-rw-r-- 1 root root  20748 Nov  2 09:05 proc.c
+  -rw-rw-r-- 1 root root   2339 Nov  2 09:05 protocol.c
+  -rw-rw-r-- 1 root root  25900 Nov  2 09:05 raw.c
+  -rw-rw-r-- 1 root root  69929 Nov  2 09:05 route.c
+  -rw-rw-r-- 1 root root  11639 Nov  2 09:05 syncookies.c
+  -rw-rw-r-- 1 root root  24418 Nov  2 09:05 sysctl_net_ipv4.c
+  -rw-rw-r-- 1 root root  84459 Nov  2 09:05 tcp.c
+  -rw-rw-r-- 1 root root   6349 Nov  2 09:05 tcp_bic.c
+  -rw-rw-r-- 1 root root  11399 Nov  2 09:05 tcp_cdg.c
+  -rw-rw-r-- 1 root root  10984 Nov  2 09:05 tcp_cong.c
+  -rw-rw-r-- 1 root root  15058 Nov  2 09:05 tcp_cubic.c
+  -rw-rw-r-- 1 root root   9674 Nov  2 09:05 tcp_dctcp.c
+  -rw-rw-r-- 1 root root   1969 Nov  2 09:05 tcp_diag.c
+  -rw-rw-r-- 1 root root   9302 Nov  2 09:05 tcp_fastopen.c
+  -rw-rw-r-- 1 root root   4966 Nov  2 09:05 tcp_highspeed.c
+  -rw-rw-r-- 1 root root   7565 Nov  2 09:05 tcp_htcp.c
+  -rw-rw-r-- 1 root root   4968 Nov  2 09:05 tcp_hybla.c
+  -rw-rw-r-- 1 root root   8350 Nov  2 09:05 tcp_illinois.c
+  -rw-rw-r-- 1 root root 181897 Nov  2 09:05 tcp_input.c
+  -rw-rw-r-- 1 root root  63388 Nov  2 09:05 tcp_ipv4.c
+  -rw-rw-r-- 1 root root   8900 Nov  2 09:05 tcp_lp.c
+  -rw-rw-r-- 1 root root   5661 Nov  2 09:05 tcp_memcontrol.c
+  -rw-rw-r-- 1 root root  31129 Nov  2 09:05 tcp_metrics.c
+  -rw-rw-r-- 1 root root  26301 Nov  2 09:05 tcp_minisocks.c
+  -rw-rw-r-- 1 root root   7777 Nov  2 09:05 tcp_offload.c
+  -rw-rw-r-- 1 root root 103411 Nov  2 09:05 tcp_output.c
+  -rw-rw-r-- 1 root root   7564 Nov  2 09:05 tcp_probe.c
+  -rw-rw-r-- 1 root root   1406 Nov  2 09:05 tcp_scalable.c
+  -rw-rw-r-- 1 root root  18837 Nov  2 09:05 tcp_timer.c
+  -rw-rw-r-- 1 root root   9805 Nov  2 09:05 tcp_vegas.c
+  -rw-rw-r-- 1 root root   5767 Nov  2 09:05 tcp_veno.c
+  -rw-rw-r-- 1 root root   8361 Nov  2 09:05 tcp_westwood.c
+  -rw-rw-r-- 1 root root   7041 Nov  2 09:05 tcp_yeah.c
+  -rw-rw-r-- 1 root root   4220 Nov  2 09:05 tunnel4.c
+  -rw-rw-r-- 1 root root  66396 Nov  2 09:05 udp.c
+  -rw-rw-r-- 1 root root   5633 Nov  2 09:05 udp_diag.c
+  -rw-rw-r-- 1 root root  11360 Nov  2 09:05 udp_offload.c
+  -rw-rw-r-- 1 root root   3189 Nov  2 09:05 udp_tunnel.c
+  -rw-rw-r-- 1 root root   3483 Nov  2 09:05 udplite.c
+  -rw-rw-r-- 1 root root   3975 Nov  2 09:05 xfrm4_input.c
+  -rw-rw-r-- 1 root root   3773 Nov  2 09:05 xfrm4_mode_beet.c
+  -rw-rw-r-- 1 root root   2135 Nov  2 09:05 xfrm4_mode_transport.c
+  -rw-rw-r-- 1 root root   3031 Nov  2 09:05 xfrm4_mode_tunnel.c
+  -rw-rw-r-- 1 root root   2592 Nov  2 09:05 xfrm4_output.c
+  -rw-rw-r-- 1 root root   7664 Nov  2 09:05 xfrm4_policy.c
+  -rw-rw-r-- 1 root root   6813 Nov  2 09:05 xfrm4_protocol.c
+  -rw-rw-r-- 1 root root   2494 Nov  2 09:05 xfrm4_state.c
+  -rw-rw-r-- 1 root root   2765 Nov  2 09:05 xfrm4_tunnel.c
+  
+  % ls -l *.c | awk '{ print $5 }' | stats -v
+  count   87
+  sum     1.96204e+06
+  min     1406
+  max     181897
+  mean    22552.2
+  median  11399
+  mode    13810
+  var     7.60447e+08
+  stddev  27576.2
+  cv      122.277
+  skew    2.90083
+  kurt    11.6306
+  quant10 3031
+  quant25 5661
+  quant50 11399
+  quant75 29472
+  quant90 64272
+  conf90  4863.41
+  conf95  5794.7
+  conf99  7615.89
+  findex  0.400774
+  
+=back
+
+=head1 AVAILABILITY
+
+The latest version of B<stats> is available at
+
+http://www.lsnl.jp/~ohsaki/software/stats/stats
+
+=head1 SEE ALSO
+
+perl(1), perlnumber(1), perlre(1)
+
+=head1 AUTHOR
+
+Hiroyuki Ohsaki <ohsaki[atmark]lsnl.jp>
+
+=cut
+
+
+EOF

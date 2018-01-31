@@ -1,0 +1,189 @@
+#!/usr/bin/perl
+#
+# A monitor class for visualizing simulation with OpenGL.
+# freeglut3-dev from apt-get
+#
+
+package Monitor::3D_OpenGL;
+
+use OpenGL qw(:all);
+use OpenGL::Shader;
+use Smart::Comments;
+use diagnostics;
+use strict;
+use warnings;
+use base qw(Class::Accessor::Fast);
+__PACKAGE__->mk_accessors(
+    qw(width height graph pause video_file screen_w screen_h screen surface agents_ref)
+);
+
+
+my @Light_Ambient  = ( 0.1, 0.1, 0.1, 1.0 );
+my @Light_Diffuse  = ( 1.0, 1.0, 1.0, 1.0 );
+my @Light_Position = ( 2.0, 2.0, 0.0, 1.0 );
+my @Color=( 0.0, 0.0, 1.0, 1.0 );
+
+my $PIXEL_PER_UNIT  = 900 / 1000;
+
+my $AGENTS;
+
+my $dx=0;
+
+# meter-to-pixel conversion
+sub unit2pixel {
+    return $_[0] * $PIXEL_PER_UNIT;
+}
+
+sub idle {
+    # sleep 0.1;
+    glutPostRedisplay();
+
+    # glutMainLoop();
+}
+
+sub displayFunc {
+    @Light_Ambient  = ( 0.1, 0.1, 0.1, 1.0 );
+    @Light_Diffuse  = ( 1.0, 1.0, 1.0, 1.0 );
+    @Light_Position = ( 30.0, 30.0, 30.0, 1.0 );
+    @Color=( 0.0, 1.0, 1.0, 1.0 );
+
+    glLightfv_p(GL_LIGHT0, GL_POSITION, @Light_Position);
+    glLightfv_p(GL_LIGHT0, GL_AMBIENT,  @Light_Ambient);
+    glLightfv_p(GL_LIGHT0, GL_DIFFUSE,  @Light_Diffuse);
+    glEnable(GL_LIGHT0);
+
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
+    # glViewport(0, 0, $self->{screen_w}, $self->{screen_h});
+    glViewport(0, 0, 600, 600);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    # gluPerspective(10.0,$self->{screen_w}/$self->{screen_h}, 1.0, 500.0);
+    gluPerspective(10.0,1.0, 1.0, 500.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    gluLookAt(150.0,100.0,-200.0,
+    	      0.0,0.0,0.0,
+    	      0.0,1.0,0.0);
+
+    glLineWidth(1);
+    glMaterialfv_p(GL_FRONT, GL_DIFFUSE, 1.0, 1.0, 1.0, 1.0);
+    glutWireCube(30);
+
+
+
+    # my $agents_ref=$self->{agents_ref};
+    for my $agent (@$AGENTS) {
+	my $v = $agent->mobility->current;
+
+	
+        my ( $x, $y, $z ) = ($v->[0]-$dx, $v->[1]-15, $v->[2]-15 );
+
+	glLoadIdentity();	
+    	gluLookAt(150.0,100.0,-200.0,
+    		  0.0,0.0,0.0,
+    		  0.0,1.0,0.0);
+	
+
+    	glMaterialfv_p(GL_FRONT, GL_DIFFUSE, @Color);
+    	glTranslatef($x,$y,$z);
+    	glutSolidSphere(0.5,10,10);
+		
+	glLoadIdentity();	
+
+    	gluLookAt(150.0,100.0,-200.0,
+    		  0.0,0.0,0.0,
+    		  0.0,1.0,0.0);
+
+    	glMaterialfv_p(GL_FRONT, GL_DIFFUSE, 0.0,0.0,1.0,0.3);
+    	glTranslatef($x,$y,$z);
+    	glutSolidSphere(1,10,10);
+	
+
+    }
+    
+
+    glutSwapBuffers();
+
+}
+
+
+# create and initialize the object
+sub new {
+    my ( $class, %opts ) = @_;
+
+    my $self = {%opts};
+    bless $self, $class;
+
+    $self->{screen_w} = unit2pixel( $self->{width} );
+    $self->{screen_h} = unit2pixel( $self->{height} );
+    # $self->{screen_w} = $self->{width};
+    # $self->{screen_h} = $self->{height};
+
+    return $self;
+
+}
+
+
+sub open {
+    my ( $self, $agents_ref ) = @_;
+
+    my @Light_Ambient  = ( 0.1, 0.1, 0.1, 1.0 );
+    my @Light_Diffuse  = ( 1.0, 1.0, 1.0, 1.0 );
+    my @Light_Position = ( 30.0, 30.0, 30.0, 1.0 );
+    my @Color=( 0.0, 1.0, 1.0, 1.0 );
+
+
+    glutInit();
+    # glutInitWindowSize($self->{screen_w} , $self->{screen_h});
+    glutInitWindowSize(600 , 600);
+    glutInitDisplayMode(GLUT_RGBA | GLUT_DEPTH | GLUT_DOUBLE);
+    glutCreateWindow("DTN simulation");
+    glEnable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glEnable(GL_BLEND); # ブレンドの有効化
+
+    glEnable(GL_LIGHTING);
+    glLightfv_p(GL_LIGHT0, GL_POSITION, @Light_Position);
+    glLightfv_p(GL_LIGHT0, GL_AMBIENT,  @Light_Ambient);
+    glLightfv_p(GL_LIGHT0, GL_DIFFUSE,  @Light_Diffuse);
+    glEnable(GL_LIGHT0);
+
+    glEnable(GL_DEPTH_TEST);
+    
+    # glutDisplayFunc(\&displayFunc);
+    # glutIdleFunc(\&idle);
+
+}
+sub display {
+    my ( $self, $time, $agents_ref ) = @_;
+
+    $AGENTS=$agents_ref;
+
+    # glutLeaveMainLoop();
+
+    # glutDisplayFunc(\&displayFunc);
+    # glutIdleFunc(\&idle);
+    displayFunc($self);
+    glutMainLoopEvent();
+    $dx+=0.1;
+
+}
+
+sub close {
+    my ( $self, $agents_ref ) = @_;
+
+    # convert seiries of BMP files into AVI video
+    if ( $self->video_file ) {
+        my $file = $self->video_file;
+        system
+            "mencoder mf://$TMPDIR/*.bmp -ovc lavc -lavcopts vbitrate=8192 -o $file";
+    }
+}
+
+
+1;

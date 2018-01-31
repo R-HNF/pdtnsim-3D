@@ -1,0 +1,158 @@
+#!/usr/bin/perl
+
+use File::Basename;
+use Getopt::Std;
+use Math::Vector::Real;
+use Smart::Comments;
+use diagnostics;
+use strict;
+use warnings;
+
+my $TMAX         = 60 * 60 *60;                   # maximum simulation time
+my $FIELD_WIDTH  = 800;                      # field width
+my $FIELD_HEIGHT = 600;                      # field height
+my $HEIGHT_FOR_3D = 100;                        # changed
+my $MAX_SPEED    = 4000 / 60 / 60;            # maximum node velocity
+my $MIN_SPEED    = $MAX_SPEED / 2;            # minimum node velocity
+my $MIN_PAUSE    = 0;                         # minimum pause time
+my $MAX_PAUSE    = 5 * 60;                    # maximum pause time
+my $RANGE        = 10;                        # communication range
+my $DELTA        = $RANGE / $MAX_SPEED / 4;   # legnth of ecah simulation step
+
+sub usage {
+    my $prog = basename($0);
+    die <<EOF;
+usage: $prog [-v] [-m mobility] [-a agent]  [-n \#] [-w \#] [-I id[,id]...] [-s \#] [-M monitor] [-p sec]
+  -v            verbose mode
+  -m mobility   name of mobility class
+  -a agent      name of agent class
+  -n \#          number of agents
+  -w \#          number of wired agents
+  -I id[,id...] initial infected nodes
+  -s \#          seed of random number generator
+  -M monitor    monitor simulatoin execution with MONITOR class
+  -p sec        pause SEC seconds every simulation step
+EOF
+}
+
+sub speed {
+    return ( $MIN_SPEED + rand( $MAX_SPEED - $MIN_SPEED ) );
+}
+
+sub pause {
+    return ( $MIN_PAUSE + rand( $MAX_PAUSE - $MIN_PAUSE ) );
+}
+
+# create and connect all wired agents
+sub init_wired_agents {
+    use Agent::Wired;
+    my ( $agents_ref, $nwired_agents, $mobility_class, $graph ) = @_;
+
+    my @wired_agents;
+    ### $agents_ref
+
+    my $nagents = @$agents_ref;
+
+    for ( 1 .. $nwired_agents ) {
+        my $mobility = $mobility_class->new(
+            speed  => sub { return 0 },
+            pause  => sub { return 0 },
+            width  => $FIELD_WIDTH,
+            height => $FIELD_HEIGHT,
+            graph  => $graph
+	    );
+	sleep(100);
+        push(
+            @wired_agents,
+            Agent::Wired->new(
+                id       => $nagents + $_,
+                range    => $RANGE,
+                mobility => $mobility
+            )
+        );
+    }
+    # connect all wired agents
+    for my $from (@wired_agents) {
+        for my $to (@wired_agents) {
+            next if ( $from eq $to );
+            push( @{ $from->friends }, $to );
+        }
+    }
+    push( @$agents_ref, @wired_agents );
+}
+
+our ( $opt_v, $opt_m, $opt_a, $opt_n, $opt_w, $opt_I, $opt_s, $opt_M,
+    $opt_p );
+getopts('vm:a:n:w:I:s:M:p:') or usage;
+
+my $verbose        = $opt_v;
+my $mobility_class = $opt_m || 'Mobility::RandomWaypoint';
+my $agent_class    = $opt_a || 'Agent::P_BCAST';
+my $nagents        = $opt_n || 50;
+my $nwired_agents  = $opt_w;
+my @init_infected  = defined $opt_I ? split( ',', $opt_I ) : (1);
+srand($opt_s) if defined $opt_s;
+my $monitor_class = $opt_M || 'Monitor::SDL';
+my $pause_time = $opt_p;
+
+eval "use $mobility_class;";
+eval "use $agent_class;";
+eval "use $monitor_class;";
+
+# create underlying graph
+my $graph = $mobility_class->create_path(
+    width  => $FIELD_WIDTH,
+    height => $FIELD_HEIGHT
+);
+
+# create and initialize agents
+my @agents;
+for my $id ( 1 .. $nagents ) {
+    my $mobility = $mobility_class->new(
+        speed  => \&speed,
+        pause  => \&pause,
+        width  => $FIELD_WIDTH,
+        height => $FIELD_HEIGHT,
+	height3d => $HEIGHT_FOR_3D, # changed
+        graph  => $graph
+    );
+    push(
+        @agents,
+        $agent_class->new(
+            id       => $id,
+            range    => $RANGE,
+            mobility => $mobility,
+        )
+    );
+}
+for my $n (@init_infected) {
+    $agents[ $n - 1 ]->received->{1}++;
+}
+
+init_wired_agents( \@agents, $nwired_agents, $mobility_class, $graph )
+    if $nwired_agents;
+
+# create and open monitor object
+my $monitor = $monitor_class->new(
+    width  => $FIELD_WIDTH,
+    height => $FIELD_HEIGHT,
+    height3d => $HEIGHT_FOR_3D, # changed
+    graph  => $graph,
+    pause  => $pause_time,
+);
+$monitor->open( \@agents );
+
+# run simulation for TMAX seconds
+my $time = 0;
+
+while ( $time <= $TMAX ) {
+    for my $agent (@agents) {
+        $agent->mobility->move($DELTA);
+        $agent->forward( \@agents );
+    }
+    $time += $DELTA;
+
+    $monitor->display( $time, \@agents );
+}
+
+$monitor->close( \@agents );

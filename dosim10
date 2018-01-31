@@ -1,0 +1,7 @@
+#!/bin/bash -x
+for i in {1..10}
+do
+    ./dtnsim -M Monitor::Log -n 200 | ./p-coverage 200 90
+done >log-200-90per
+echo -n "$n "
+./stats -v log-200-90per | ./pick-mean-and-conf95 >n200-90per-mean-and-conf95

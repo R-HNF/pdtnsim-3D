@@ -1,0 +1,10 @@
+#!/bin/bash -x
+for n in 10 20 50 100
+do
+    for i in {1..10}
+    do
+	./dtnsim -M Monitor::Log -n $n | ./p-coverage $n 50
+    done >log-$n-50per
+    echo -n "$n "
+    ./stats -v log-$n-50per | ./pick-mean-and-conf95 >n$n-50per-mean-and-conf95
+done
